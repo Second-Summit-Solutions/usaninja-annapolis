@@ -1,0 +1,27 @@
+name: Discussion / design
+description: Open-ended question, design discussion, or RFC. No spec required.
+title: "[discuss] "
+labels: ["type:discussion"]
+body:
+  - type: textarea
+    id: topic
+    attributes:
+      label: Topic
+      description: What's the question, proposal, or design under discussion?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context / prior art
+      description: Links to related discussions, memory entries, docs, or precedents.
+    validations:
+      required: false
+  - type: markdown
+    attributes:
+      value: |
+        ---
+
+        If this discussion converges on a coding task, file a separate
+        **Cursor task** issue (don't retrofit this one). Keep the
+        discussion thread as the historical record.

@@ -1,0 +1,48 @@
+name: Cursor task (coding work)
+description: A coding task that will be picked up by Cursor, LLM-workbench, or Claude. Requires a spec.
+title: "[task] "
+labels: ["claude-ready", "needs-spec"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Filing a Cursor task
+
+        This issue will be picked up by an agent (Cursor, LLM-workbench, or
+        Claude as fallback worker). It MUST have a valid `ss-spec v=1` comment
+        before it will be picked up.
+
+        The fastest path to a correct spec: leave this issue to Claude to
+        author. Claude files a stub body here, then posts the formal spec as a
+        tagged comment on the issue. The CI check at merge time will block any
+        PR linked to this issue unless the spec comment is present.
+
+        If you're a human filing this directly, either (a) leave a stub and
+        let Claude fill in the spec in chat, or (b) fill in all seven sections
+        below and the action will convert it into the canonical spec comment
+        for you.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One or two sentences. What does this task accomplish, and why?
+      placeholder: "e.g., Add a /health endpoint to the ops-bridge service so the watchdog can tell if it's up."
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context / motivation (optional)
+      description: Links to related issues, prior work, memory entries, Slack threads, dashboards, etc.
+      placeholder: "Refs ss-ops#42, memory mem_abc123…, Slack thread <url>"
+    validations:
+      required: false
+  - type: markdown
+    attributes:
+      value: |
+        ---
+
+        **After filing:** Claude will post the full `ss-spec v=1` comment on
+        this issue. The `needs-spec` label will auto-flip to `has-spec` once
+        that comment is present and valid. At that point, the issue is
+        eligible for pickup.
