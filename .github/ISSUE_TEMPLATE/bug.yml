@@ -1,0 +1,53 @@
+name: Bug report
+description: Something is broken. No spec required — just repro and impact.
+title: "[bug] "
+labels: ["type:bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One or two sentences describing what's broken.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction / evidence
+      description: Exact steps, commands, URLs, log excerpts, or screenshots. The more concrete, the faster this gets fixed.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs. actual
+      description: What should have happened vs. what did happen.
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - p0 — production down, customer-facing
+        - p1 — degraded but workable
+        - p2 — minor / cosmetic
+        - p3 — nice-to-have
+      default: 1
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context / links (optional)
+      description: Related issues, memory entries, Slack threads, dashboards.
+    validations:
+      required: false
+  - type: markdown
+    attributes:
+      value: |
+        ---
+
+        If the fix ends up being a coding task (not a config tweak or
+        operational action), someone will add the `claude-ready` label and
+        Claude will post a spec comment. At that point, the PR check applies.
