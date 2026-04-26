@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, ss-vps]
     # Skip PR comment events — issue_comment fires for both, we only care about issues.
     if: ${{ github.event.issue.pull_request == null }}
     steps:
@@ -76,10 +76,10 @@ jobs:
           fi
 
           # Fetch all comments and look for a valid spec.
-          # NOTE: emit the first matching body atomically inside jq. Piping to
-          # `head -n 1` after `jq -r` truncates multi-line bodies to the
-          # sentinel line only, causing valid specs to be mislabeled
-          # needs-spec (github-repo-creator#9).
+          # CRITICAL: emit the full matching body atomically inside jq.
+          # NEVER pipe this through `head -n 1` — that truncates multi-line specs to the
+          # sentinel line, mislabels valid specs as needs-spec, and silently breaks the
+          # contract. See github-repo-creator#52.
           comments_json="$(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}/comments" --paginate)"
           spec_comment="$(
             echo "$comments_json" \
