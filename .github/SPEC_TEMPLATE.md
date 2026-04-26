@@ -52,9 +52,19 @@ Be exact. Full paths relative to repo root.
 
 Execute this end-to-end without asking for confirmation. Do not spawn
 subagents. Commit changes, push to a feature branch, open a PR against
-`Second-Summit-marketing/<repo>` with `Closes #<N>` in the body. Bot
-identity commits (GIT_AUTHOR_* / GIT_COMMITTER_* are pre-wired by the
-runtime). Do not self-approve or self-merge — Claude approves and merges.
+`Second-Summit-Solutions/<repo>`. Bot identity commits (GIT_AUTHOR_* /
+GIT_COMMITTER_* are pre-wired by the runtime). Do not self-approve or
+self-merge — Claude approves and merges.
+
+**The PR body MUST begin with a line that exactly matches one of the
+GitHub auto-close magic keywords: `Closes #N`, `closes #N`, `Fixes #N`,
+`fixes #N`, `Resolves #N`, or `resolves #N` — on its own line, before any
+other content.** Narrative phrasings such as "as specified in issue #N",
+"for issue #N", or "addresses issue #N" do NOT trigger GitHub auto-close;
+the linked issue will stay open after merge and have to be closed by
+hand. The magic-keyword line is required even when the PR body has its
+own `## What` / `## Why` sections — put `Closes #N` first, then the
+sections.
 
 ## VERIFICATION
 

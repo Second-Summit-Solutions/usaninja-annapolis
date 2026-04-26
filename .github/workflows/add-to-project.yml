@@ -1,0 +1,90 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# REQUIRED SECRETS & VARIABLES
+# ─────────────────────────────────────────────────────────────────────────────
+# vars.PROJECT_URL  (repo or org variable)
+#   URL of the org Projects V2 board to add items to.
+#   Format: https://github.com/orgs/<ORG>/projects/<NUMBER>
+#   Set at org level: gh variable set PROJECT_URL --org <ORG> --visibility all \
+#                       --body "https://github.com/orgs/<ORG>/projects/<N>"
+#
+# secrets.PROJECT_PAT  (repo or org secret, PREFERRED)
+#   A GitHub personal access token with the 'project' OAuth scope.
+#   Without this scope, adding items to Projects V2 will fail with 403.
+#   Set at org level: gh secret set PROJECT_PAT --org <ORG> --visibility all
+#   Falls back to secrets.GITHUB_TOKEN (built-in) which lacks the project scope —
+#   workflows using only GITHUB_TOKEN will silently fail on Projects V2 mutations.
+#
+# vars.ALLOW_GITHUB_TOKEN_FOR_PROJECT  (optional escape hatch)
+#   Set to 'true' to allow GITHUB_TOKEN fallback when PROJECT_PAT is not available.
+#   This is for future compatibility in case Projects V2 API gains GITHUB_TOKEN support.
+#
+# This workflow uses pull_request_target (not pull_request) for PR events so that
+# fork PRs can access secrets.PROJECT_PAT. This is safe because the workflow only
+# reads server-assigned metadata (node_id) and does not check out PR code or
+# execute any PR-controlled strings. See GitHub Security Lab advisory:
+# https://securitylab.github.com/research/github-actions-preventing-pwn-requests/
+#
+# See docs/post-install.md for the full post-org-creation checklist.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Auto-add to project
+
+# Safe to use pull_request_target because this workflow:
+# - Only reads context.payload.pull_request.node_id (server-assigned GraphQL ID)
+# - Does NOT check out PR code with actions/checkout
+# - Does NOT run PR-supplied scripts or evaluate PR-controlled strings
+# - Does NOT invoke any PR-controlled code execution
+# Per GitHub Security Lab: https://securitylab.github.com/research/github-actions-preventing-pwn-requests/
+# This trigger change enables fork PRs to access secrets.PROJECT_PAT for successful GraphQL mutations.
+on:
+  issues:
+    types: [opened, reopened]
+  pull_request_target:
+    types: [opened, reopened, ready_for_review]
+
+# PROJECT_URL is a repo/org variable (e.g. https://github.com/orgs/ORG/projects/N).
+# PROJECT_PAT is a repo/org secret that must have the `project` OAuth scope.
+# If PROJECT_URL is empty the job is skipped entirely.
+#
+# NOTE: actions/add-to-project was deprecated (no Node 24 release available as of 2026-04).
+# This workflow uses actions/github-script@v7 with direct ProjectsV2 GraphQL instead.
+jobs:
+  add:
+    if: ${{ vars.PROJECT_URL != '' && (secrets.PROJECT_PAT != '' || vars.ALLOW_GITHUB_TOKEN_FOR_PROJECT == 'true') }}
+    runs-on: [self-hosted, linux, x64, ss-vps]
+    steps:
+      - name: Add to project
+        uses: actions/github-script@v7
+        env:
+          HAS_PROJECT_PAT: ${{ secrets.PROJECT_PAT != '' }}
+        with:
+          github-token: ${{ secrets.PROJECT_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            if (!process.env.HAS_PROJECT_PAT) core.warning('PROJECT_PAT not set; using GITHUB_TOKEN — addProjectV2ItemById is likely to 403.');
+            const projectUrl = '${{ vars.PROJECT_URL }}';
+            const m = projectUrl.match(/\/orgs\/([^/]+)\/projects\/(\d+)/);
+            if (!m) { core.setFailed('PROJECT_URL does not match expected orgs/ORG/projects/N format'); return; }
+            const [, org, numStr] = m;
+            const projectNum = parseInt(numStr, 10);
+            const contentId = context.payload.issue?.node_id ?? context.payload.pull_request?.node_id;
+            if (!contentId) { core.setFailed('No node_id found on event payload'); return; }
+
+            // Resolve project global node ID from numeric URL
+            const projResult = await github.graphql(
+              `query($org: String!, $num: Int!) {
+                organization(login: $org) { projectV2(number: $num) { id } }
+              }`,
+              { org, num: projectNum }
+            );
+            const projectId = projResult.organization?.projectV2?.id;
+            if (!projectId) { core.setFailed('Could not resolve project ID from PROJECT_URL'); return; }
+
+            // Add issue/PR to project board
+            await github.graphql(
+              `mutation($pid: ID!, $cid: ID!) {
+                addProjectV2ItemById(input: { projectId: $pid, contentId: $cid }) {
+                  item { id }
+                }
+              }`,
+              { pid: projectId, cid: contentId }
+            );
+            core.info('Added ' + contentId + ' to project ' + projectId);

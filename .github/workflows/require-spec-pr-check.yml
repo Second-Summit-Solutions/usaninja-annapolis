@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   check-spec:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, ss-vps]
     steps:
       - name: Check linked issue has valid spec
         env:
@@ -45,7 +45,7 @@ jobs:
           done <<< "$labels"
 
           # Extract linked issues from body/title via Closes/Fixes/Resolves keywords.
-          # Matches: `Closes #42`, `Fixes Second-Summit-marketing/other#7` (cross-repo).
+          # Matches: `Closes #42`, `Fixes Second-Summit-Solutions/other#7` (cross-repo).
           # NOTE: `set +o pipefail` inside the command-substitution subshell is
           # required because grep exits 1 on no match; with pipefail on, a
           # no-match grep in the pipeline would kill the whole script silently

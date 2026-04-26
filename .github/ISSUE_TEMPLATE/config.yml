@@ -3,5 +3,5 @@ blank_issues_enabled: false
 
 contact_links:
   - name: Ops / Incident
-    url: https://github.com/Second-Summit-marketing/ss-ops/issues/new/choose
+    url: https://github.com/Second-Summit-Solutions/ss-ops/issues/new/choose
     about: For operational events, incidents, or postmortems, file in ss-ops.
