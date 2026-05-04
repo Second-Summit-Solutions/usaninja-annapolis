@@ -45,7 +45,11 @@ jobs:
             --force >/dev/null 2>&1 || true
 
           # Add the label (idempotent — gh succeeds if already present).
-          gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label skip-issue-link
+          # NOTE: use REST API directly. gh pr edit --add-label triggers a GraphQL
+          # deprecation warning (Projects classic) and exits non-zero on every repo,
+          # silently failing to apply the label. See github-repo-creator#102.
+          gh api "repos/${REPO}/issues/${PR_NUMBER}/labels" \
+            -X POST -f 'labels[]=skip-issue-link' >/dev/null
 
           # Read current PR body and append the marker line if missing.
           body="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body --jq '.body // ""')"
