@@ -1,0 +1,61 @@
+# Auto-labeling rules — triage.yml applies these on issue/PR events.
+# Labels defined in ../config/labels.json
+
+# Area labels — auto-applied by file path matching
+"area:docs":
+  - changed-files:
+    - any-glob-to-any-file: ['docs/**', '*.md', '**/*.md']
+
+"area:infra":
+  - changed-files:
+    - any-glob-to-any-file: ['deploy/**', 'docker/**', '.github/workflows/**']
+
+"area:tests":
+  - changed-files:
+    - any-glob-to-any-file: ['tests/**', '**/test_*.py', '**/conftest.py']
+
+"area:ci":
+  - changed-files:
+    - any-glob-to-any-file: ['.github/**']
+
+# Risk labels — auto-applied by file path matching for risky-paths gating
+"risk:migrations":
+  - changed-files:
+    - any-glob-to-any-file: ['migrations/**', 'alembic/**']
+
+"risk:secrets":
+  - changed-files:
+    - any-glob-to-any-file: ['**/.env*', '**/secrets*', '**/vault*', '**/*.key', '**/credentials*']
+
+"risk:auth":
+  - changed-files:
+    - any-glob-to-any-file: ['**/auth*', '**/authn*', '**/authz*', '**/oauth*', '**/jwt*']
+
+"risk:cron":
+  - changed-files:
+    - any-glob-to-any-file: ['cron*', '**/cron/**', '*.systemd', '*.service', '*.timer']
+
+"risk:webhook":
+  - changed-files:
+    - any-glob-to-any-file: ['**/webhook*', '**/hooks/**']
+
+"risk:deploy":
+  - changed-files:
+    - any-glob-to-any-file: ['install.sh', 'deploy.sh', 'Dockerfile*', 'docker-compose*.yml', '.github/workflows/**']
+
+"risk:deps":
+  - changed-files:
+    - any-glob-to-any-file: ['poetry.lock', 'package*.json', 'requirements*.txt', 'Pipfile.lock', 'pyproject.toml', 'Cargo.lock']
+
+# Type labels — auto-applied by branch name pattern
+"type:bug":
+  - head-branch: ['^fix/', '^bugfix/', '^hotfix/']
+
+"type:feat":
+  - head-branch: ['^feat/', '^feature/']
+
+"type:chore":
+  - head-branch: ['^chore/', '^refactor/', '^docs/']
+
+"type:docs":
+  - head-branch: ['^docs/']
