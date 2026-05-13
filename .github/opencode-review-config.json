@@ -1,0 +1,59 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "memory": {
+      "type": "remote",
+      "url": "http://theclaw2:8902/mcp",
+      "enabled": true
+    },
+    "github": {
+      "type": "remote",
+      "url": "http://theclaw2:8905/mcp",
+      "enabled": true
+    },
+    "vps-fs": {
+      "type": "remote",
+      "url": "http://theclaw2:8904/mcp",
+      "headers": {
+        "Authorization": "Bearer {env:VPS_FS_TOKEN}"
+      },
+      "enabled": true,
+      "timeout": 10000
+    },
+    "ghl": {
+      "type": "remote",
+      "url": "http://theclaw2:8900/mcp",
+      "enabled": false
+    },
+    "icp": {
+      "type": "remote",
+      "url": "http://theclaw2:8903/mcp",
+      "enabled": false
+    }
+  },
+  "tools": {
+    "vps-fs_vps_execute": false,
+    "vps-fs_vps_write_file": false,
+    "vps-fs_vps_edit_file": false,
+    "vps-fs_vps_delete_file": false,
+    "vps-fs_vps_move_file": false,
+    "github_github_create_issue": false,
+    "github_github_create_pr": false,
+    "github_github_comment_on_pr": false,
+    "github_github_comment_issue": false,
+    "github_github_close_issue": false,
+    "github_github_create_repo": false,
+    "github_github_create_release": false,
+    "github_pr_close": false,
+    "github_pr_merge": false,
+    "github_pr_review": false,
+    "github_github_add_labels": false,
+    "github_github_remove_labels": false,
+    "github_github_assign_issue": false,
+    "memory_memory_store": false,
+    "memory_memory_store_if_new": false,
+    "memory_memory_update": false,
+    "memory_memory_upsert": false,
+    "memory_memory_delete": false
+  }
+}
