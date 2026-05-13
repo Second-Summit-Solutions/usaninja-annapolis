@@ -70,6 +70,40 @@ jobs:
             -f context="check-opencode-review" \
             -f description="Skipped: ${{ steps.skip.outputs.reason }}"
 
+      - name: Prepare MCP config and credentials
+        if: steps.skip.outputs.skip == 'false'
+        id: mcp_config
+        run: |
+          set -euo pipefail
+
+          CONFIG_TEMPLATE="$GITHUB_WORKSPACE/.github/opencode-review-config.json"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          CONFIG_TMP="/tmp/opencode_review_mcp_config_${PR_NUMBER}.json"
+
+          if [ ! -f "$CONFIG_TEMPLATE" ]; then
+            echo "::warning::MCP config template not found at $CONFIG_TEMPLATE — review will run without MCP access"
+            echo "config_path=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          VPS_FS_TOKEN=$(python3 /opt/ss-cron-system/vault/get-cred.py vps-fs.bearer_token 2>/dev/null || echo '')
+
+          if [ -n "$VPS_FS_TOKEN" ]; then
+            echo "vps-fs MCP enabled with vault token"
+            cp "$CONFIG_TEMPLATE" "$CONFIG_TMP"
+            echo "VPS_FS_TOKEN=${VPS_FS_TOKEN}" >> "$GITHUB_ENV"
+          else
+            echo "::warning::VPS_FS_TOKEN not found in vault — vps-fs MCP will be disabled"
+            jq '.mcp["vps-fs"].enabled = false' "$CONFIG_TEMPLATE" > "$CONFIG_TMP" 2>/dev/null || {
+              echo "::notice::jq failed; running without MCP config"
+              echo "config_path=" >> "$GITHUB_OUTPUT"
+              exit 0
+            }
+          fi
+
+          echo "config_path=$CONFIG_TMP" >> "$GITHUB_OUTPUT"
+          echo "MCP config written to $CONFIG_TMP"
+
       - name: Gather context and run review
         if: steps.skip.outputs.skip == 'false'
         id: review
@@ -78,14 +112,23 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           SHA: ${{ github.event.pull_request.head.sha }}
+          OPENCODE_CONFIG: ${{ steps.mcp_config.outputs.config_path }}
         run: |
           set -euo pipefail
 
           MAX_CHARS=200000
-          OPENCODE_TIMEOUT=180
+          OPENCODE_TIMEOUT=300
           WORKDIR="$GITHUB_WORKSPACE"
 
           echo "== OpenCode AI Review for ${REPO}#${PR_NUMBER} =="
+
+          # ── MCP config status ──
+          if [ -n "${OPENCODE_CONFIG:-}" ] && [ -f "$OPENCODE_CONFIG" ]; then
+            echo "MCP config loaded from $OPENCODE_CONFIG"
+            echo "Enabled MCP servers: $(jq -r '.mcp | to_entries | map(select(.value.enabled == true) | .key) | join(", ")' "$OPENCODE_CONFIG")"
+          else
+            echo "No MCP config — review will use PR-local context only"
+          fi
 
           # ── PR diff ──
           PR_DIFF="$(gh pr diff "$PR_NUMBER" --repo "$REPO")"
@@ -234,7 +277,7 @@ jobs:
             -f "$PROMPT_FILE" \
             --dangerously-skip-permissions \
             --print-logs \
-            "Review this PR diff. Output ONLY the structured rubric with the 7 headings (DESIGN, COMPLEXITY, TESTS, NAMING / STYLE, RISK, SPEC ALIGNMENT, NOTES). Do NOT use any tools — respond with the review text directly." \
+            "Review this PR diff. Output ONLY the structured rubric with all required headings (DESIGN, COMPLEXITY, TESTS, NAMING / STYLE, RISK, SPEC ALIGNMENT, NOTES, CITATIONS). Use MCP tools to fetch org context before writing the rubric." \
             > "$REVIEW_OUT" 2>&1; then
             echo "OpenCode completed successfully"
           else
