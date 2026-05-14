@@ -312,6 +312,7 @@ jobs:
           if [ ${#MISSING[@]} -gt 0 ]; then
             echo "WARNING: missing rubric headings: ${MISSING[*]}"
             REVIEW_BODY="${REVIEW_BODY}"$'\n\n---\n'"_(auto: missing headings: ${MISSING[*]})_"
+            echo "$REVIEW_BODY" > "$REVIEW_OUT"
           fi
 
           # ── Post review COMMENT ──
