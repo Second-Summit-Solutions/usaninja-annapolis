@@ -73,6 +73,9 @@ jobs:
       - name: Prepare MCP config and credentials
         if: steps.skip.outputs.skip == 'false'
         id: mcp_config
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          VPS_FS_TOKEN: ${{ secrets.VPS_FS_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -86,7 +89,8 @@ jobs:
             exit 0
           fi
 
-          VPS_FS_TOKEN=$(python3 /opt/ss-cron-system/vault/get-cred.py vps-fs.bearer_token 2>/dev/null || echo '')
+          # VPS_FS_TOKEN now comes from GH Actions org secret (set via env: on this step)
+          # See parent commit for context on why vault helper is unreachable from runner.
 
           if [ -n "$VPS_FS_TOKEN" ]; then
             echo "vps-fs MCP enabled with vault token"
@@ -101,14 +105,16 @@ jobs:
             }
           fi
 
-          # Layer 2 fix for #163: source DeepSeek API key from vault
-          DEEPSEEK_API_KEY=$(python3 /opt/ss-cron-system/vault/get-cred.py deepseek.api_key 2>/dev/null || echo '')
-
+          # Layer 2 fix for #163 (final): use GH Actions org secret instead of vault helper.
+          # The vault helper at /opt/ss-cron-system/vault/get-cred.py is on the HOST
+          # filesystem and isn't mounted into the runner container, so the helper can't
+          # run from inside the runner. DEEPSEEK_API_KEY is now set as an org secret
+          # (visibility: all) and passed via the step's env block.
           if [ -n "$DEEPSEEK_API_KEY" ]; then
-            echo "DeepSeek key sourced from vault"
+            echo "DeepSeek key from GH Actions secret"
             echo "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}" >> "$GITHUB_ENV"
           else
-            echo "::error::deepseek.api_key not in vault — opencode review cannot run"
+            echo "::error::DEEPSEEK_API_KEY secret not set — opencode review cannot run"
             echo "config_path=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
