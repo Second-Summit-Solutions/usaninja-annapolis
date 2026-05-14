@@ -5,7 +5,13 @@ name: OpenCode AI Review (DeepSeek)
 # The status check `check-opencode-review` is intentionally NOT a required
 # status — Claude (PAT) remains the formal reviewer of record.
 #
-# Skip conditions: dependabot PRs, skip-ai-review label, draft PRs.
+# Skip conditions:
+#   - paths-ignore filter (docs/*, *.md, workflow YAML, license/gitignore)
+#   - job-level size gate (PR must change >=15 lines or >=3 files)
+#   - dependabot PRs
+#   - `skip-ai-review` label
+#   - draft PRs
+#
 # Error contract: if OpenCode is unavailable, posts a short comment and
 # exits 0 — the soft-signal pattern never blocks merge.
 #
@@ -15,11 +21,26 @@ name: OpenCode AI Review (DeepSeek)
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+    # Skip the workflow entirely for changes that are not worth an AI review:
+    # docs, plain markdown, and meta config files. A mixed docs+code PR will
+    # still trigger because GitHub fires the workflow when ANY changed file
+    # falls outside paths-ignore. Surfaced in ss-gh-runners#125.
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - '.github/**/*.yml'
+      - '.github/**/*.yaml'
+      - '.github/**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.gitattributes'
+      - 'CODEOWNERS'
 
 permissions:
   issues: read
   pull-requests: write
   contents: read
+  statuses: write
 
 concurrency:
   group: opencode-review-pr-${{ github.event.pull_request.number }}
@@ -29,6 +50,18 @@ jobs:
   review:
     runs-on: [self-hosted, linux, x64, ss-vps]
     timeout-minutes: 10
+    # Size gate — skip trivial PRs (e.g. 2-line `# nosemgrep` patches) that
+    # don't benefit from an AI review and just burn a runner slot. Triggers
+    # review only when the PR is non-trivial along at least one dimension:
+    # >=15 additions, >=15 deletions, or >=3 files changed. Thresholds are
+    # additive — a 14-line / 1-file PR is skipped; bump it to 15 lines OR
+    # 3 files and it gets reviewed. Note: arithmetic (`additions + deletions`)
+    # is NOT supported in GitHub Actions expressions, so the three dimensions
+    # are checked separately. ss-gh-runners#125.
+    if: |
+      github.event.pull_request.additions >= 15 ||
+      github.event.pull_request.deletions >= 15 ||
+      github.event.pull_request.changed_files >= 3
     steps:
       - name: Checkout repo (for CLAUDE.md + prompt template)
         uses: actions/checkout@v4
@@ -68,7 +101,7 @@ jobs:
           gh api "repos/$REPO/statuses/$SHA" \
             -f state=success \
             -f context="check-opencode-review" \
-            -f description="Skipped: ${{ steps.skip.outputs.reason }}"
+            -f description="Skipped: ${{ steps.skip.outputs.reason }}" || true
 
       - name: Prepare MCP config and credentials
         if: steps.skip.outputs.skip == 'false'
@@ -295,20 +328,31 @@ jobs:
 
           # ── Run OpenCode ──
           REVIEW_OUT="/tmp/opencode_review_output_${PR_NUMBER}.txt"
+          LOG_OUT="/tmp/opencode_review_logs_${PR_NUMBER}.txt"
           echo "Invoking opencode run (timeout ${OPENCODE_TIMEOUT}s)..."
 
+          # stderr goes to a separate file so --print-logs noise doesn't end up
+          # in the PR review body. GitHub's review body cap is 65,536 chars;
+          # merged stderr+stdout regularly exceeded that on PRs with heavier
+          # MCP usage, causing the POST to /pulls/:n/reviews to fail. See gh-rc#176/#184.
           if timeout "$OPENCODE_TIMEOUT" opencode run \
             --model deepseek/deepseek-chat \
             -f "$PROMPT_FILE" \
             --dangerously-skip-permissions \
             --print-logs \
             "Review this PR diff. Output ONLY the structured rubric with all required headings (DESIGN, COMPLEXITY, TESTS, NAMING / STYLE, RISK, SPEC ALIGNMENT, NOTES, CITATIONS). Use MCP tools to fetch org context before writing the rubric." \
-            > "$REVIEW_OUT" 2>&1; then
+            > "$REVIEW_OUT" 2> "$LOG_OUT"; then
             echo "OpenCode completed successfully"
+            echo "--- opencode stderr/logs ---"
+            cat "$LOG_OUT" || true
+            echo "--- end opencode logs ---"
           else
             EXIT_CODE=$?
             echo "OpenCode failed or timed out (exit code: $EXIT_CODE)"
-            ERR_MSG="OpenCode review unavailable: $(head -c 500 "$REVIEW_OUT" 2>/dev/null || echo "timeout after ${OPENCODE_TIMEOUT}s")"
+            echo "--- opencode stderr/logs ---"
+            cat "$LOG_OUT" || true
+            echo "--- end opencode logs ---"
+            ERR_MSG="OpenCode review unavailable: $(head -c 500 "$LOG_OUT" 2>/dev/null || head -c 500 "$REVIEW_OUT" 2>/dev/null || echo "timeout after ${OPENCODE_TIMEOUT}s")"
 
             jq -n --arg body "$ERR_MSG" '{event: "COMMENT", body: $body}' \
               | gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --input - || true
@@ -318,7 +362,7 @@ jobs:
               -f context="check-opencode-review" \
               -f description="OpenCode unavailable" || true
 
-            rm -f "$PROMPT_FILE" "$REVIEW_OUT"
+            rm -f "$PROMPT_FILE" "$REVIEW_OUT" "$LOG_OUT"
             exit 0
           fi
 
@@ -340,17 +384,31 @@ jobs:
             echo "$REVIEW_BODY" > "$REVIEW_OUT"
           fi
 
+          # ── Cap body at GitHub's review-body limit (65536 chars) ──
+          # Defensive backstop: even with stderr split off, large CITATIONS
+          # tables can push us over. Truncate at 60k for footer headroom.
+          MAX_REVIEW_BODY=60000
+          ORIG_LEN=${#REVIEW_BODY}
+          if [ "$ORIG_LEN" -gt "$MAX_REVIEW_BODY" ]; then
+            echo "::warning::Review body ${ORIG_LEN} chars exceeds ${MAX_REVIEW_BODY}; truncating (see gh-rc#184)"
+            REVIEW_BODY="${REVIEW_BODY:0:$MAX_REVIEW_BODY}"$'\n\n---\n'"_(auto: body truncated from ${ORIG_LEN} chars; full output in workflow logs)_"
+            echo "$REVIEW_BODY" > "$REVIEW_OUT"
+          fi
+
           # ── Post review COMMENT ──
           echo "Posting review to ${REPO}#${PR_NUMBER}..."
           jq -n --rawfile body "$REVIEW_OUT" '{event: "COMMENT", body: $body}' \
             | gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --input -
 
           # ── Emit success status ──
+          # Wrapped in `|| true` to match the error-path versions above so a
+          # transient 4xx on this soft-signal status emit can never fail the
+          # job after the review COMMENT itself has already been posted.
           gh api "repos/$REPO/statuses/$SHA" \
             -f state=success \
             -f context="check-opencode-review" \
-            -f description="OpenCode AI review posted"
+            -f description="OpenCode AI review posted" || true
 
           # Cleanup
-          rm -f "$PROMPT_FILE" "$REVIEW_OUT"
+          rm -f "$PROMPT_FILE" "$REVIEW_OUT" "$LOG_OUT"
           echo "== Review complete =="
