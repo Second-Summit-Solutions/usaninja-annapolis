@@ -14,7 +14,7 @@ on:
 
 permissions:
   issues: read
-  pull-requests: read
+  pull-requests: write
   contents: read
 
 jobs:
@@ -104,11 +104,11 @@ jobs:
           # exits 1 under pipefail, killing the subshell silently under set -e.
           test_count="$(
             set +o pipefail
-            echo "$changed_files" | grep -cE '^(tests/|test/|__tests__/|.*_test\.py$|.*\.test\.ts$|.*\.spec\.ts$)' || true
+            echo "$changed_files" | grep -cE '(^|/)(tests/|test/|__tests__/)|.*_test\.py$|.*\.test\.ts$|.*\.spec\.ts$' || true
           )"
           non_test_count="$(
             set +o pipefail
-            echo "$changed_files" | grep -cvE '^(tests/|test/|__tests__/|.*_test\.py$|.*\.test\.ts$|.*\.spec\.ts$)' || true
+            echo "$changed_files" | grep -cvE '(^|/)(tests/|test/|__tests__/)|.*_test\.py$|.*\.test\.ts$|.*\.spec\.ts$' || true
           )"
 
           echo "  Test files changed: $test_count"
