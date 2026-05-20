@@ -35,11 +35,19 @@ name: Auto-add to project
 # - Does NOT invoke any PR-controlled code execution
 # Per GitHub Security Lab: https://securitylab.github.com/research/github-actions-preventing-pwn-requests/
 # This trigger change enables fork PRs to access secrets.PROJECT_PAT for successful GraphQL mutations.
+#
+# push is listed here only so GitHub does not fire the workflow with zero jobs on every push
+# (a GitHub Actions platform behaviour where pull_request_target workflows also receive push
+# events for the base branch, resulting in conclusion:failure / jobs:[] when push is absent
+# from the on: block). The add job is guarded by the event_name check below so push events
+# are always skipped cleanly → conclusion:success.
 on:
   issues:
     types: [opened, reopened]
   pull_request_target:
     types: [opened, reopened, ready_for_review]
+  push:
+    branches: [main, 'spec/**', 'fix/**', 'feat/**', 'chore/**']
 
 # PROJECT_URL is a repo/org variable (e.g. https://github.com/orgs/ORG/projects/N).
 # PROJECT_PAT is a repo/org secret that must have the `project` OAuth scope.
@@ -49,7 +57,11 @@ on:
 # This workflow uses actions/github-script@v7 with direct ProjectsV2 GraphQL instead.
 jobs:
   add:
-    if: ${{ vars.PROJECT_URL != '' && (secrets.PROJECT_PAT != '' || vars.ALLOW_GITHUB_TOKEN_FOR_PROJECT == 'true') }}
+    # Push events fire this workflow due to a GitHub Actions platform behaviour with
+    # pull_request_target triggers. Guard on event_name so push events skip cleanly.
+    # Secrets are NOT checked here — secret expressions in job-level if: can cause
+    # evaluation errors on push events. The step itself handles missing PROJECT_PAT.
+    if: ${{ (github.event_name == 'issues' || github.event_name == 'pull_request_target') && vars.PROJECT_URL != '' }}
     runs-on: [self-hosted, linux, x64, ss-vps]
     steps:
       - name: Add to project
