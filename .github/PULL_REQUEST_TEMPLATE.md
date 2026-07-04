@@ -13,9 +13,9 @@ Closes #___
 - [ ] Change 1
 - [ ] Change 2
 
-## Post-OpenCode QA checklist (Claude fills this in)
+## Agent self-review checklist
 
-- [ ] OpenCode output scan clean (no errors in stdout)
+- [ ] Tool/command output scan clean (no errors in stdout/stderr)
 - [ ] All claimed files exist at stated paths
 - [ ] Syntax / build check passes
 - [ ] Import check passes (`python -c "import ..."` or equivalent)
@@ -28,16 +28,12 @@ Closes #___
 
 ## Review model reminder
 
-Second Summit uses a two-identity model: worker bot (`ss-opencode-agent[bot]`) pushes code; Claude (under `github.pat`) reviews, approves, and merges. The ruleset requires **1 approving review + `require_last_push_approval`** — that's enforced, not theatre, because the approver identity is distinct from the pushing identity.
+Second Summit uses a direct agent workflow: Claude/Codex implements, opens PRs, self-reviews, and merges under Dan's PAT-backed GitHub identity. The ruleset requires PRs plus green CI, with **0 required approving reviews** and no last-push approval gate.
 
-- Claude is the reviewer of record — and the approving identity.
-- If any of the ambiguity conditions below apply, Claude asks Dan **in chat**, records the decision under `## Decisions from chat`, and then approves + merges.
-- If none apply and CI is green → Claude approves and squash-merges.
-- Admin bypass is used only for emergencies, doc-only fallback-worker PRs (noted below), or repo setup. Document any use here.
-
-**Was this PR authored as a Claude fallback-worker (OpenCode down/out-of-quota)?**
-- [ ] No — normal worker-then-approver flow.
-- [ ] Yes — Claude authored + will admin-bypass merge. Reason: _______________________
+- Claude/Codex is the reviewer of record.
+- If any ambiguity condition below applies, ask Dan **in chat**, record the decision under `## Decisions from chat`, then proceed.
+- If none apply and CI is green, squash-merge.
+- Admin bypass is used only for emergencies or repo setup. Document any use here.
 
 ## Ambiguity / escalation check (ask Dan in chat if any are true)
 
@@ -48,7 +44,7 @@ Second Summit uses a two-identity model: worker bot (`ss-opencode-agent[bot]`) p
 - [ ] Touches billing, payments, waivers, or customer-facing copy
 - [ ] Introduces a new dependency or a major-version bump
 - [ ] Weakens, skips, or xfails an existing test
-- [ ] OpenCode diverged from the spec in a material way
+- [ ] Implementation diverged from the spec in a material way
 - [ ] A known memory gotcha is being intentionally violated
 - [ ] CI looks flaky in a suspicious way
 - [ ] There's a genuine design tradeoff Claude can't call alone
