@@ -1,5 +1,5 @@
 <!--
-CANONICAL Cursor / LLM-workbench spec template.
+CANONICAL agent task spec template.
 
 When filing a `claude-ready` issue, Claude posts a comment on the issue in
 EXACTLY this format. The top sentinel line is REQUIRED — the
