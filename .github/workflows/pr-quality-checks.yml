@@ -12,6 +12,17 @@ on:
   pull_request:
     types: [opened, edited, synchronize, ready_for_review, reopened, labeled, unlabeled]
 
+# Concurrency control — cancels in-flight runs for the same PR when a new
+# event (push, label change, edit) arrives. Required-status semantics still
+# hold: GitHub treats a superseded run as replaced by the newer one, and the
+# replacement satisfies branch protection once it passes.
+#
+# Without this, label flips and rapid pushes queued 3+ redundant runs per PR
+# on the self-hosted runner pool. Surfaced in ss-gh-runners#125.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   issues: read
   pull-requests: write
@@ -32,7 +43,36 @@ jobs:
 
           echo "== check-size for ${REPO}#${PR_NUMBER} =="
 
-          pr_json="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json additions,changedFiles,body,labels)"
+          # Resilient read helper (#319): retry a read-only gh call up to 3x to
+          # ride out transient 5xx / secondary-rate-limit / self-hosted-runner
+          # timeouts, then SEPARATE exit status from output so the caller can
+          # choose fail-open vs fail-closed. Prints stdout and returns 0 on
+          # success; prints nothing and returns non-zero on persistent failure
+          # — never conflating "fetch failed" with "genuinely empty" (the root
+          # cause of the fail-OPEN gaps these gates used to have).
+          gh_retry() {
+            local _out _rc=1 _n
+            for _n in 1 2 3; do
+              if _out="$("$@")"; then
+                printf '%s' "$_out"
+                return 0
+              else
+                # Capture gh's exit code HERE, inside `else`: a bare
+                # `if ...; fi` with no else returns 0 when the condition is
+                # false, so `_rc=$?` after the `fi` would wrongly read 0 and the
+                # helper would return success on failure — silently re-opening
+                # the fail-OPEN gap. #319.
+                _rc=$?
+              fi
+              if [ "$_n" -lt 3 ]; then sleep "$((_n * 2))"; fi
+            done
+            return "$_rc"
+          }
+
+          if ! pr_json="$(gh_retry gh pr view "$PR_NUMBER" --repo "$REPO" --json additions,changedFiles,body,labels)"; then
+            echo "::error::check-size: could not fetch PR metadata from gh after retries — failing CLOSED. Re-run the check."
+            exit 1
+          fi
           additions="$(echo "$pr_json" | jq -r '.additions')"
           changed_files="$(echo "$pr_json" | jq -r '.changedFiles')"
           body="$(echo "$pr_json" | jq -r '.body // ""')"
@@ -54,19 +94,60 @@ jobs:
             reason_parts+=("$changed_files files (cap: 15)")
           fi
 
+          size_reason="$(IFS='; '; echo "${reason_parts[*]}")"
+
+          # Append a step-summary block via printf. Using printf rather than a
+          # heredoc keeps the closing token off the line — heredocs are awkward
+          # inside a YAML `run: |` block because the closing delimiter must sit
+          # at column 0, which would terminate the YAML block scalar.
+          emit_summary() {
+            printf '%s\n' "$@" >> "$GITHUB_STEP_SUMMARY"
+          }
+
           if $oversized; then
             if $has_bypass_label; then
-              if echo "$body" | grep -qE '^Big-PR-justified: .+'; then
+              # here-string, NOT `echo "$body" | grep -q`: under `set -o
+              # pipefail`, grep -q short-circuits on an early match and closes
+              # the pipe, echo dies with SIGPIPE on the unread remainder of a
+              # large body, and pipefail propagates echo's non-zero -- so the
+              # `if` reads FALSE even though the marker matched, a deterministic
+              # false-negative on large PR bodies (marker is line 2). #316.
+              if grep -qE '^Big-PR-justified: .+' <<<"$body"; then
                 echo "PR exceeds size caps but has bypass — PASS."
-                echo "  Reasons: $(IFS='; '; echo "${reason_parts[*]}")"
+                echo "  Reasons: $size_reason"
                 exit 0
               else
                 echo "::error::size:large-justified label present but body is missing 'Big-PR-justified: <reason>' line (must be bare line at col 0)."
+                emit_summary \
+                  "### check-size FAILED — bypass label present but body marker missing" \
+                  "" \
+                  "PR exceeds the size cap (**$size_reason**)." \
+                  "" \
+                  "The \`size:large-justified\` label is applied, but the PR body is missing the required bare-line marker." \
+                  "" \
+                  "**Both are required to bypass — the label alone is not enough.**" \
+                  "" \
+                  "Add this line to the PR body (must start at column 0, no indent, no markdown):" \
+                  "" \
+                  "    Big-PR-justified: <one-line reason>"
                 exit 1
               fi
             else
-              echo "::error::PR is too large: $(IFS='; '; echo "${reason_parts[*]}")."
+              echo "::error::PR is too large: $size_reason."
               echo "::error::Apply label 'size:large-justified' and add a 'Big-PR-justified: <reason>' line to the PR body to bypass."
+              emit_summary \
+                "### check-size FAILED — PR exceeds size cap" \
+                "" \
+                "PR is too large: **$size_reason**." \
+                "" \
+                "**To bypass, BOTH are required:**" \
+                "" \
+                "1. Add the \`size:large-justified\` label to this PR." \
+                "2. Add this line to the PR body (must start at column 0, no indent, no markdown):" \
+                "" \
+                "    Big-PR-justified: <one-line reason>" \
+                "" \
+                "The label alone is not enough. The marker line alone is not enough. Both must be present."
               exit 1
             fi
           else
@@ -88,7 +169,30 @@ jobs:
 
           echo "== check-tests for ${REPO}#${PR_NUMBER} =="
 
-          pr_json="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body,labels)"
+          # Resilient read helper (#319) — see rationale in check-size.
+          gh_retry() {
+            local _out _rc=1 _n
+            for _n in 1 2 3; do
+              if _out="$("$@")"; then
+                printf '%s' "$_out"
+                return 0
+              else
+                # Capture gh's exit code HERE, inside `else`: a bare
+                # `if ...; fi` with no else returns 0 when the condition is
+                # false, so `_rc=$?` after the `fi` would wrongly read 0 and the
+                # helper would return success on failure — silently re-opening
+                # the fail-OPEN gap. #319.
+                _rc=$?
+              fi
+              if [ "$_n" -lt 3 ]; then sleep "$((_n * 2))"; fi
+            done
+            return "$_rc"
+          }
+
+          if ! pr_json="$(gh_retry gh pr view "$PR_NUMBER" --repo "$REPO" --json body,labels)"; then
+            echo "::error::check-tests: could not fetch PR metadata from gh after retries — failing CLOSED. Re-run the check."
+            exit 1
+          fi
           body="$(echo "$pr_json" | jq -r '.body // ""')"
           labels="$(echo "$pr_json" | jq -r '.labels[].name')"
 
@@ -97,18 +201,51 @@ jobs:
             [ "$lbl" = "no-tests-justified" ] && has_bypass_label=true
           done <<< "$labels"
 
-          changed_files="$(gh pr diff "$PR_NUMBER" --repo "$REPO" --name-only || true)"
+          # Fail CLOSED on an unfetchable diff (#319): the old `|| true` turned a
+          # transient gh failure into an empty list, which then miscounted as
+          # "1 non-test file, 0 test files" and falsely FAILED a valid PR.
+          if ! changed_files="$(gh_retry gh pr diff "$PR_NUMBER" --repo "$REPO" --name-only)"; then
+            echo "::error::check-tests: could not fetch changed files from gh after retries — failing CLOSED. Re-run the check."
+            exit 1
+          fi
+
+          # A genuinely empty diff (gh succeeded, no files) means there is
+          # nothing to test — PASS. This also guards the `grep -cv` blank-line
+          # miscount that the old swallowed-failure path could reach. #319.
+          if [ -z "$changed_files" ]; then
+            echo "No files changed — PASS."
+            exit 0
+          fi
+
+          # Doc-only short-circuit: if every changed file matches a doc/meta
+          # pattern, the PR cannot meaningfully ship "code without tests" — pass
+          # without forcing the no-tests-justified label + Tests-skipped marker
+          # dance. Mixed PRs (e.g. .py + .md) still hit the existing logic.
+          # Tracks github-repo-creator#224.
+          doc_only_pattern='(\.(md|txt|rst)$|(^|/)(LICENSE|CODEOWNERS|\.gitignore|\.gitattributes)$)'
+          total_count="$(
+            set +o pipefail
+            echo "$changed_files" | grep -c . || true
+          )"
+          doc_count="$(
+            set +o pipefail
+            echo "$changed_files" | grep -cE "$doc_only_pattern" || true
+          )"
+          if [ "$total_count" -gt 0 ] && [ "$doc_count" -eq "$total_count" ]; then
+            echo "PR touches only documentation files ($doc_count files) — PASS."
+            exit 0
+          fi
 
           # Test file patterns
           # NOTE: set +o pipefail because grep -c returns 0 on no match and
           # exits 1 under pipefail, killing the subshell silently under set -e.
           test_count="$(
             set +o pipefail
-            echo "$changed_files" | grep -cE '(^|/)(tests/|test/|__tests__/)|.*_test\.py$|.*\.test\.ts$|.*\.spec\.ts$' || true
+            echo "$changed_files" | grep -cE '(^|/)(tests/|test/|__tests__/)|(^|/)test_.*\.py$|.*_test\.py$|.*\.test\.ts$|.*\.spec\.ts$' || true
           )"
           non_test_count="$(
             set +o pipefail
-            echo "$changed_files" | grep -cvE '(^|/)(tests/|test/|__tests__/)|.*_test\.py$|.*\.test\.ts$|.*\.spec\.ts$' || true
+            echo "$changed_files" | grep -cvE '(^|/)(tests/|test/|__tests__/)|(^|/)test_.*\.py$|.*_test\.py$|.*\.test\.ts$|.*\.spec\.ts$' || true
           )"
 
           echo "  Test files changed: $test_count"
@@ -124,26 +261,55 @@ jobs:
             exit 0
           fi
 
-          # Check if repo has recognized test infrastructure
+          # Check if repo has recognized test infrastructure.
+          # A gh failure here must NOT be conflated with "no infra" (fail-OPEN
+          # #319): a clean HTTP 404 means the path is genuinely absent, but a
+          # transient 5xx/timeout means we could not DETERMINE infra — in which
+          # case fail CLOSED rather than silently PASS a code-without-tests PR.
+          # gh_path_state <path> -> prints "exists" | "absent" | "error".
+          gh_path_state() {
+            local _out _n
+            for _n in 1 2 3; do
+              if _out="$(gh api "repos/$REPO/contents/$1" 2>&1)"; then
+                echo exists
+                return 0
+              fi
+              # A clean 404 = path genuinely absent (not a fetch failure).
+              if printf '%s' "$_out" | grep -qiE 'HTTP 404|not found'; then
+                echo absent
+                return 0
+              fi
+              if [ "$_n" -lt 3 ]; then sleep "$((_n * 2))"; fi
+            done
+            echo error
+            return 0
+          }
+
           has_test_infra=false
+          probe_error=false
           for dir in tests test __tests__; do
-            if gh api "repos/$REPO/contents/$dir" --jq '.' >/dev/null 2>&1; then
-              has_test_infra=true
-              echo "  Found test directory: $dir/"
-              break
-            fi
+            case "$(gh_path_state "$dir")" in
+              exists) has_test_infra=true; echo "  Found test directory: $dir/"; break ;;
+              error)  probe_error=true ;;
+            esac
           done
 
-          # Also check for test files at repo root
-          if ! $has_test_infra; then
-            root_files="$(
-              set +o pipefail
-              gh api "repos/$REPO/contents/" --jq '.[].name' 2>/dev/null || true
-            )"
-            if echo "$root_files" | grep -qE '_test\.py$|\.test\.ts$|\.spec\.ts$'; then
-              has_test_infra=true
-              echo "  Found test files at repo root"
+          # Also check for test files at repo root. A failed root-contents read
+          # fails CLOSED (probe_error), never "no infra".
+          if ! $has_test_infra && ! $probe_error; then
+            if root_files="$(gh_retry gh api "repos/$REPO/contents/" --jq '.[].name')"; then
+              if echo "$root_files" | grep -qE '_test\.py$|\.test\.ts$|\.spec\.ts$'; then
+                has_test_infra=true
+                echo "  Found test files at repo root"
+              fi
+            else
+              probe_error=true
             fi
+          fi
+
+          if $probe_error; then
+            echo "::error::check-tests: could not determine test infrastructure (gh error after retries) — failing CLOSED. Re-run the check."
+            exit 1
           fi
 
           if ! $has_test_infra; then
@@ -151,17 +317,48 @@ jobs:
             exit 0
           fi
 
+          # Append a step-summary block via printf (see emit_summary rationale in check-size).
+          emit_summary() {
+            printf '%s\n' "$@" >> "$GITHUB_STEP_SUMMARY"
+          }
+
           if $has_bypass_label; then
-            if echo "$body" | grep -qE '^Tests-skipped: .+'; then
+            # here-string avoids the pipefail broken-pipe false-negative on
+            # large bodies -- see the check-size marker check for the full
+            # rationale. #316.
+            if grep -qE '^Tests-skipped: .+' <<<"$body"; then
               echo "Tests not changed but bypass label + reason line present — PASS."
               exit 0
             else
               echo "::error::no-tests-justified label present but body is missing 'Tests-skipped: <reason>' line (must be bare line at col 0)."
+              emit_summary \
+                "### check-tests FAILED — bypass label present but body marker missing" \
+                "" \
+                "Code changed without test changes, and the \`no-tests-justified\` label is applied, but the PR body is missing the required bare-line marker." \
+                "" \
+                "**Both are required to bypass — the label alone is not enough.**" \
+                "" \
+                "Add this line to the PR body (must start at column 0, no indent, no markdown):" \
+                "" \
+                "    Tests-skipped: <one-line reason>"
               exit 1
             fi
           else
             echo "::error::Code changed ($non_test_count files) without any test file changes, and this repo has test infrastructure."
             echo "::error::Apply label 'no-tests-justified' and add a 'Tests-skipped: <reason>' line to the PR body to bypass."
+            emit_summary \
+              "### check-tests FAILED — code changed without tests" \
+              "" \
+              "**$non_test_count** non-test file(s) changed without any test file changes, and this repo has test infrastructure." \
+              "" \
+              "**To bypass, BOTH are required:**" \
+              "" \
+              "1. Add the \`no-tests-justified\` label to this PR." \
+              "2. Add this line to the PR body (must start at column 0, no indent, no markdown):" \
+              "" \
+              "    Tests-skipped: <one-line reason>" \
+              "" \
+              "The label alone is not enough. The marker line alone is not enough. Both must be present."
             exit 1
           fi
 
@@ -179,7 +376,30 @@ jobs:
 
           echo "== check-atomicity for ${REPO}#${PR_NUMBER} =="
 
-          pr_json="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body,title,labels)"
+          # Resilient read helper (#319) — see rationale in check-size.
+          gh_retry() {
+            local _out _rc=1 _n
+            for _n in 1 2 3; do
+              if _out="$("$@")"; then
+                printf '%s' "$_out"
+                return 0
+              else
+                # Capture gh's exit code HERE, inside `else`: a bare
+                # `if ...; fi` with no else returns 0 when the condition is
+                # false, so `_rc=$?` after the `fi` would wrongly read 0 and the
+                # helper would return success on failure — silently re-opening
+                # the fail-OPEN gap. #319.
+                _rc=$?
+              fi
+              if [ "$_n" -lt 3 ]; then sleep "$((_n * 2))"; fi
+            done
+            return "$_rc"
+          }
+
+          if ! pr_json="$(gh_retry gh pr view "$PR_NUMBER" --repo "$REPO" --json body,title,labels)"; then
+            echo "::error::check-atomicity: could not fetch PR metadata from gh after retries — failing CLOSED. Re-run the check."
+            exit 1
+          fi
           body="$(echo "$pr_json" | jq -r '.body // ""')"
           title="$(echo "$pr_json" | jq -r '.title // ""')"
           labels="$(echo "$pr_json" | jq -r '.labels[].name')"
@@ -190,10 +410,14 @@ jobs:
           done <<< "$labels"
 
           # Extract linked issues from body/title via Closes/Fixes/Resolves keywords.
+          # The keyword is anchored with a leading word boundary `(^|[^[:alnum:]])`
+          # so prose substrings like `discloses #5` / `foreclosed #9` / `prefixes #7`
+          # do not match and inflate the linked-issue count (#320). The trailing
+          # `grep -oE '#[0-9]+'` / `awk '{print $NF}'` strips the captured leading char.
           linked_same_repo="$(
             set +o pipefail
             printf '%s\n%s\n' "$body" "$title" \
-            | grep -oEi '(close[sd]?|fixe[sd]?|resolve[sd]?)[[:space:]]+#[0-9]+' \
+            | grep -oEi '(^|[^[:alnum:]])(close[sd]?|fixe[sd]?|resolve[sd]?)[[:space:]]+#[0-9]+' \
             | grep -oE '#[0-9]+' \
             | tr -d '#' \
             | sort -u
@@ -203,30 +427,34 @@ jobs:
           linked_cross_repo="$(
             set +o pipefail
             printf '%s\n%s\n' "$body" "$title" \
-            | grep -oEi '(close[sd]?|fixe[sd]?|resolve[sd]?)[[:space:]]+[A-Za-z0-9._-]+/[A-Za-z0-9._-]+#[0-9]+' \
+            | grep -oEi '(^|[^[:alnum:]])(close[sd]?|fixe[sd]?|resolve[sd]?)[[:space:]]+[A-Za-z0-9._-]+/[A-Za-z0-9._-]+#[0-9]+' \
             | awk '{print $NF}' \
             | sort -u
           )"
 
-          # GraphQL closingIssuesReferences (Development sidebar links)
-          graphql_refs="$(
-            gh api graphql -f query='
-              query($owner:String!, $repo:String!, $pr:Int!) {
-                repository(owner:$owner, name:$repo) {
-                  pullRequest(number:$pr) {
-                    closingIssuesReferences(first:20) {
-                      nodes { number repository { nameWithOwner } }
-                    }
-                  }
+          # GraphQL closingIssuesReferences (Development sidebar links).
+          # Retry, then FALL BACK to the body/title text parse on persistent
+          # failure. A bare `|| true` here would silently drop sidebar-only
+          # links and abort the whole step on a transient GraphQL 502 /
+          # secondary-rate-limit (false-FAIL). #319.
+          gql_query='query($owner:String!, $repo:String!, $pr:Int!) {
+            repository(owner:$owner, name:$repo) {
+              pullRequest(number:$pr) {
+                closingIssuesReferences(first:20) {
+                  nodes { number repository { nameWithOwner } }
                 }
-              }' \
-              -F owner="${REPO%/*}" -F repo="${REPO#*/}" -F pr="$PR_NUMBER" \
-              --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[]
-                    | if .repository.nameWithOwner == "'"$REPO"'"
-                      then (.number | tostring)
-                      else (.repository.nameWithOwner + "#" + (.number | tostring))
-                      end' \
-          )"
+              }
+            }
+          }'
+          gql_jq='.data.repository.pullRequest.closingIssuesReferences.nodes[]
+                  | if .repository.nameWithOwner == "'"$REPO"'"
+                    then (.number | tostring)
+                    else (.repository.nameWithOwner + "#" + (.number | tostring))
+                    end'
+          if ! graphql_refs="$(gh_retry gh api graphql -f query="$gql_query" -F owner="${REPO%/*}" -F repo="${REPO#*/}" -F pr="$PR_NUMBER" --jq "$gql_jq")"; then
+            echo "::warning::check-atomicity: GraphQL closingIssuesReferences fetch failed after retries — falling back to body/title text parse only."
+            graphql_refs=""
+          fi
 
           # Merge same-repo references
           same_repo="$(
@@ -267,18 +495,49 @@ jobs:
             all_issues="${all_issues}$ref "
           done
 
+          # Append a step-summary block via printf (see emit_summary rationale in check-size).
+          emit_summary() {
+            printf '%s\n' "$@" >> "$GITHUB_STEP_SUMMARY"
+          }
+
           if $has_bypass_label; then
-            if echo "$body" | grep -qE '^Multi-issue-justified: .+'; then
+            # here-string avoids the pipefail broken-pipe false-negative on
+            # large bodies -- see the check-size marker check for the full
+            # rationale. #316.
+            if grep -qE '^Multi-issue-justified: .+' <<<"$body"; then
               echo "PR closes $total_linked issues but has bypass — PASS."
               echo "  Issues: $all_issues"
               exit 0
             else
               echo "::error::multi-issue-justified label present but body is missing 'Multi-issue-justified: <reason>' line (must be bare line at col 0)."
+              emit_summary \
+                "### check-atomicity FAILED — bypass label present but body marker missing" \
+                "" \
+                "PR closes **$total_linked** issues ($(echo $all_issues | xargs)) and the \`multi-issue-justified\` label is applied, but the PR body is missing the required bare-line marker." \
+                "" \
+                "**Both are required to bypass — the label alone is not enough.**" \
+                "" \
+                "Add this line to the PR body (must start at column 0, no indent, no markdown):" \
+                "" \
+                "    Multi-issue-justified: <one-line reason>"
               exit 1
             fi
           else
             echo "::error::PR closes $total_linked issues ($(echo $all_issues | xargs)). Split into one issue per PR."
             echo "::error::Apply label 'multi-issue-justified' and add a 'Multi-issue-justified: <reason>' line to the PR body to bypass."
+            emit_summary \
+              "### check-atomicity FAILED — PR closes multiple issues" \
+              "" \
+              "PR closes **$total_linked** issues ($(echo $all_issues | xargs)). The convention is one issue per PR." \
+              "" \
+              "**To bypass, BOTH are required:**" \
+              "" \
+              "1. Add the \`multi-issue-justified\` label to this PR." \
+              "2. Add this line to the PR body (must start at column 0, no indent, no markdown):" \
+              "" \
+              "    Multi-issue-justified: <one-line reason>" \
+              "" \
+              "The label alone is not enough. The marker line alone is not enough. Both must be present."
             exit 1
           fi
 
@@ -296,7 +555,35 @@ jobs:
 
           echo "== check-risky-paths for ${REPO}#${PR_NUMBER} =="
 
-          changed_files="$(gh pr diff "$PR_NUMBER" --repo "$REPO" --name-only || true)"
+          # Resilient read helper (#319) — see rationale in check-size.
+          gh_retry() {
+            local _out _rc=1 _n
+            for _n in 1 2 3; do
+              if _out="$("$@")"; then
+                printf '%s' "$_out"
+                return 0
+              else
+                # Capture gh's exit code HERE, inside `else`: a bare
+                # `if ...; fi` with no else returns 0 when the condition is
+                # false, so `_rc=$?` after the `fi` would wrongly read 0 and the
+                # helper would return success on failure — silently re-opening
+                # the fail-OPEN gap. #319.
+                _rc=$?
+              fi
+              if [ "$_n" -lt 3 ]; then sleep "$((_n * 2))"; fi
+            done
+            return "$_rc"
+          }
+
+          # Fail CLOSED on an unfetchable diff (#319): the old `|| true` turned a
+          # transient gh failure into "no files changed", skipping the entire
+          # risk scan + risk:reviewed gate and reporting GREEN — so a PR touching
+          # migrations/ auth secrets deploy webhook paths could merge without the
+          # human review gate. No other gate catches risky paths.
+          if ! changed_files="$(gh_retry gh pr diff "$PR_NUMBER" --repo "$REPO" --name-only)"; then
+            echo "::error::check-risky-paths: could not fetch changed files from gh after retries — failing CLOSED. Re-run the check."
+            exit 1
+          fi
 
           if [ -z "$changed_files" ]; then
             echo "No files changed — PASS."
@@ -386,11 +673,20 @@ jobs:
           while IFS= read -r lbl; do
             [ -z "$lbl" ] && continue
             echo "    - $lbl"
-            gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "$lbl" >/dev/null 2>&1 || true
+            # REST: `gh pr edit --add-label` aborts on the deprecated
+            # repository.pullRequest.projectCards GraphQL field (Projects classic
+            # sunset) and drops the label. See github-repo-creator#102,#285.
+            gh api "repos/${REPO}/issues/${PR_NUMBER}/labels" -X POST -f "labels[]=${lbl}" >/dev/null \
+              || echo "::warning::could not apply risk label ${lbl} to PR #${PR_NUMBER}"
           done <<< "$risk_labels"
 
-          # Now check if risk:reviewed is present among ALL labels
-          all_labels="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '.labels[].name')"
+          # Now check if risk:reviewed is present among ALL labels.
+          # Fail CLOSED on an unfetchable re-read (#319): if we cannot confirm
+          # the label set, we must not assume the risky change was reviewed.
+          if ! all_labels="$(gh_retry gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '.labels[].name')"; then
+            echo "::error::check-risky-paths: could not re-fetch PR labels from gh after retries — failing CLOSED. Re-run the check."
+            exit 1
+          fi
 
           has_reviewed=false
           while IFS= read -r lbl; do
