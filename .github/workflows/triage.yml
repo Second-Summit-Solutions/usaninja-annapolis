@@ -6,6 +6,17 @@ on:
   pull_request_target:
     types: [opened, reopened, ready_for_review]
 
+# Concurrency control — dedup rapid-fire events for the same issue or PR.
+# `event_name` is part of the key so an issue and a PR sharing a number (they
+# share a namespace in GitHub repos) don't cross-cancel — see the per-job
+# `if: github.event_name == ...` gates below.
+#
+# Safe because the labeling logic is idempotent (latest state wins).
+# Surfaced in ss-gh-runners#125.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   issues: write
   pull-requests: write
@@ -23,7 +34,6 @@ jobs:
             const labels = new Set();
 
             // Title-prefix heuristics.
-            if (title.startsWith('spec:') || title.startsWith('spec ')) labels.add('spec-for-cursor');
             if (title.startsWith('bug:') || title.startsWith('fix:')) labels.add('bug');
             if (title.startsWith('feat:') || title.startsWith('feature:')) labels.add('feature');
             if (title.startsWith('docs:')) labels.add('area:docs');
@@ -33,7 +43,7 @@ jobs:
 
             // Body-based heuristic: no detail → needs-spec.
             const body = (context.payload.issue.body || '').trim();
-            if (!labels.has('spec-for-cursor') && body.length < 80) {
+            if (body.length < 80) {
               labels.add('needs-spec');
             }
 

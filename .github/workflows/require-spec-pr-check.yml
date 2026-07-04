@@ -13,6 +13,17 @@ on:
   pull_request:
     types: [opened, edited, synchronize, ready_for_review, reopened, labeled, unlabeled]
 
+# Concurrency control — cancels in-flight runs for the same PR when a new
+# event (push, label change, edit) arrives. Safe because this workflow is
+# idempotent (latest PR state wins) and the required-status semantics are
+# preserved: a replaced run is treated as superseded by the newer one.
+#
+# Without this, label flips and rapid pushes queued 3+ redundant runs per PR.
+# Surfaced in ss-gh-runners#125.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   issues: read
   pull-requests: read
@@ -32,7 +43,36 @@ jobs:
 
           echo "== Checking spec for PR ${REPO}#${PR_NUMBER} =="
 
-          pr_json="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body,title,labels,baseRefName)"
+          # Resilient read helper (#319): retry a read-only gh call up to 3x to
+          # ride out transient 5xx / secondary-rate-limit / self-hosted-runner
+          # timeouts, then SEPARATE exit status from output so the caller can
+          # choose fail-open vs fail-closed. Prints stdout and returns 0 on
+          # success; prints nothing and returns non-zero on persistent failure
+          # — never conflating "fetch failed" with "genuinely empty" (the root
+          # cause of the fail-OPEN gaps this gate used to have).
+          gh_retry() {
+            local _out _rc=1 _n
+            for _n in 1 2 3; do
+              if _out="$("$@")"; then
+                printf '%s' "$_out"
+                return 0
+              else
+                # Capture gh's exit code HERE, inside `else`: a bare
+                # `if ...; fi` with no else returns 0 when the condition is
+                # false, so `_rc=$?` after the `fi` would wrongly read 0 and the
+                # helper would return success on failure — silently re-opening
+                # the fail-OPEN gap. #319.
+                _rc=$?
+              fi
+              if [ "$_n" -lt 3 ]; then sleep "$((_n * 2))"; fi
+            done
+            return "$_rc"
+          }
+
+          if ! pr_json="$(gh_retry gh pr view "$PR_NUMBER" --repo "$REPO" --json body,title,labels,baseRefName)"; then
+            echo "::error::require-spec: could not fetch PR metadata from gh after retries — failing CLOSED. Re-run the check."
+            exit 1
+          fi
           body="$(echo "$pr_json" | jq -r '.body // ""')"
           title="$(echo "$pr_json" | jq -r '.title // ""')"
           labels="$(echo "$pr_json" | jq -r '.labels[].name')"
@@ -46,6 +86,11 @@ jobs:
 
           # Extract linked issues from body/title via Closes/Fixes/Resolves keywords.
           # Matches: `Closes #42`, `Fixes Second-Summit-Solutions/other#7` (cross-repo).
+          # The keyword is anchored with a leading word boundary `(^|[^[:alnum:]])`
+          # so prose substrings like `discloses #5` / `foreclosed #9` / `prefixes #7`
+          # do not match (#320); the trailing `grep -oE '#[0-9]+'` / `awk '{print $NF}'`
+          # strips the captured leading char. This matters more now that the
+          # GraphQL path can fall back to this text-parse on a transient failure (#319).
           # NOTE: `set +o pipefail` inside the command-substitution subshell is
           # required because grep exits 1 on no match; with pipefail on, a
           # no-match grep in the pipeline would kill the whole script silently
@@ -53,7 +98,7 @@ jobs:
           linked_same_repo="$(
             set +o pipefail
             printf '%s\n%s\n' "$body" "$title" \
-            | grep -oEi '(close[sd]?|fixe[sd]?|resolve[sd]?)[[:space:]]+#[0-9]+' \
+            | grep -oEi '(^|[^[:alnum:]])(close[sd]?|fixe[sd]?|resolve[sd]?)[[:space:]]+#[0-9]+' \
             | grep -oE '#[0-9]+' \
             | tr -d '#' \
             | sort -u
@@ -62,30 +107,34 @@ jobs:
           linked_cross_repo="$(
             set +o pipefail
             printf '%s\n%s\n' "$body" "$title" \
-            | grep -oEi '(close[sd]?|fixe[sd]?|resolve[sd]?)[[:space:]]+[A-Za-z0-9._-]+/[A-Za-z0-9._-]+#[0-9]+' \
+            | grep -oEi '(^|[^[:alnum:]])(close[sd]?|fixe[sd]?|resolve[sd]?)[[:space:]]+[A-Za-z0-9._-]+/[A-Za-z0-9._-]+#[0-9]+' \
             | awk '{print $NF}' \
             | sort -u
           )"
 
           # Also check GraphQL closingIssuesReferences (the Development sidebar link).
-          graphql_refs="$(
-            gh api graphql -f query='
-              query($owner:String!, $repo:String!, $pr:Int!) {
-                repository(owner:$owner, name:$repo) {
-                  pullRequest(number:$pr) {
-                    closingIssuesReferences(first:20) {
-                      nodes { number repository { nameWithOwner } }
-                    }
-                  }
+          # Retry, then FALL BACK to the body/title text parse on persistent
+          # failure. A bare `|| true` would silently drop sidebar-only links;
+          # leaving it unguarded aborts the whole gate on a transient GraphQL
+          # 502 / secondary-rate-limit (false-FAIL). #319.
+          gql_query='query($owner:String!, $repo:String!, $pr:Int!) {
+            repository(owner:$owner, name:$repo) {
+              pullRequest(number:$pr) {
+                closingIssuesReferences(first:20) {
+                  nodes { number repository { nameWithOwner } }
                 }
-              }' \
-              -F owner="${REPO%/*}" -F repo="${REPO#*/}" -F pr="$PR_NUMBER" \
-              --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[]
-                    | if .repository.nameWithOwner == "'"$REPO"'"
-                      then (.number | tostring)
-                      else (.repository.nameWithOwner + "#" + (.number | tostring))
-                      end' \
-          )"
+              }
+            }
+          }'
+          gql_jq='.data.repository.pullRequest.closingIssuesReferences.nodes[]
+                  | if .repository.nameWithOwner == "'"$REPO"'"
+                    then (.number | tostring)
+                    else (.repository.nameWithOwner + "#" + (.number | tostring))
+                    end'
+          if ! graphql_refs="$(gh_retry gh api graphql -f query="$gql_query" -F owner="${REPO%/*}" -F repo="${REPO#*/}" -F pr="$PR_NUMBER" --jq "$gql_jq")"; then
+            echo "::warning::require-spec: GraphQL closingIssuesReferences fetch failed after retries — falling back to body/title text parse only."
+            graphql_refs=""
+          fi
 
           # Merge same-repo references from all sources.
           # Same pipefail hazard as above — grep exits 1 if the merged stream
@@ -125,7 +174,16 @@ jobs:
           # Check each same-repo linked issue.
           while IFS= read -r n; do
             [ -z "$n" ] && continue
-            labels="$(gh issue view "$n" --repo "$REPO" --json labels --jq '.labels[].name' || true)"
+            # Fail CLOSED on an unreadable label set (#319): the old `|| true`
+            # made a transient gh failure look like "no labels" → routed to the
+            # "not claude-ready — spec not required" branch, letting a
+            # claude-ready + unspecced issue slip through. (The cross-repo loop
+            # below already had an empty-guard; this same-repo path was the gap.)
+            if ! labels="$(gh_retry gh issue view "$n" --repo "$REPO" --json labels --jq '.labels[].name')"; then
+              echo "::error::require-spec: could not read labels on issue #$n after retries — failing CLOSED. Re-run the check."
+              fail=1
+              continue
+            fi
             if echo "$labels" | grep -qx claude-ready; then
               if echo "$labels" | grep -qx has-spec; then
                 echo "Issue #$n is claude-ready and has a valid spec — OK."
@@ -144,9 +202,20 @@ jobs:
             [ -z "$ref" ] && continue
             other_repo="${ref%#*}"
             other_num="${ref#*#}"
-            labels="$(gh issue view "$other_num" --repo "$other_repo" --json labels --jq '.labels[].name' 2>/dev/null || true)"
-            if [ -z "$labels" ]; then
-              echo "Could not read labels on $ref — skipping (may be private cross-org reference)."
+            # Retry to ride out a transient blip, then SEPARATE "fetch failed"
+            # from "genuinely no labels" (#319). This must SKIP on a persistent
+            # read failure, NEVER fail CLOSED — the workflow authenticates with
+            # the repo-scoped GITHUB_TOKEN, which cannot read a *different*
+            # private repo in the same org, so such a read fails PERMANENTLY
+            # (404), not transiently. Failing closed here would permanently
+            # block a legitimate `Closes org/other-private-repo#N` PR that no
+            # re-run could fix. Cross-repo spec enforcement is best-effort by
+            # design; the GraphQL closingIssuesReferences path above is the
+            # primary signal when the token can see the other repo. A
+            # successful-but-empty read (issue genuinely has no labels) is not
+            # claude-ready → not flagged, as normal.
+            if ! labels="$(gh_retry gh issue view "$other_num" --repo "$other_repo" --json labels --jq '.labels[].name')"; then
+              echo "Could not read labels on $ref after retries — skipping (cross-repo issues may be private/unreadable by the repo-scoped token)."
               continue
             fi
             if echo "$labels" | grep -qx claude-ready; then

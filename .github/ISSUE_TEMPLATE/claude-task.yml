@@ -1,16 +1,16 @@
-name: Cursor task (coding work)
-description: A coding task that will be picked up by Cursor, LLM-workbench, or Claude. Requires a spec.
+name: Claude task (coding work)
+description: A coding task picked up by Claude/Codex. Requires a spec.
 title: "[task] "
 labels: ["claude-ready", "needs-spec"]
 body:
   - type: markdown
     attributes:
       value: |
-        ## Filing a Cursor task
+        ## Filing a Claude task
 
-        This issue will be picked up by an agent (Cursor, LLM-workbench, or
-        Claude as fallback worker). It MUST have a valid `ss-spec v=1` comment
-        before it will be picked up.
+        This issue will be picked up by Claude/Codex through the direct
+        GitHub workflow. It MUST have a valid `ss-spec v=1` comment before
+        it will be picked up.
 
         The fastest path to a correct spec: leave this issue to Claude to
         author. Claude files a stub body here, then posts the formal spec as a
