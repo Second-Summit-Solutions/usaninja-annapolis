@@ -1,0 +1,82 @@
+# Line-ending and diff policy. Text is normalized to LF in the repo; binaries
+# are left untouched; Windows-native scripts keep CRLF so they run correctly.
+#
+# IMPORTANT: `scripts/rollout_gitattributes.sh` runs `git add --renormalize .`
+# against this policy. Any binary type NOT marked `binary` below risks being
+# misclassified as text (git's content sniff only spares files containing a
+# NUL byte) and having its CR bytes stripped. Keep the binary list broad.
+
+* text=auto eol=lf
+
+# --- Explicit text types -> LF ---------------------------------------------
+*.sh         text eol=lf
+*.bash       text eol=lf
+*.py         text eol=lf
+*.yml        text eol=lf
+*.yaml       text eol=lf
+*.json       text eol=lf
+*.md         text eol=lf
+*.toml       text eol=lf
+*.cfg        text eol=lf
+*.ini        text eol=lf
+*.txt        text eol=lf
+
+# --- Windows-native scripts MUST keep CRLF ---------------------------------
+*.bat        text eol=crlf
+*.cmd        text eol=crlf
+*.ps1        text eol=crlf
+*.psm1       text eol=crlf
+*.psd1       text eol=crlf
+*.sln        text eol=crlf
+
+# --- Binary: never normalize, never line-diff ------------------------------
+# Images / icons
+*.png        binary
+*.jpg        binary
+*.jpeg       binary
+*.gif        binary
+*.webp       binary
+*.bmp        binary
+*.tif        binary
+*.tiff       binary
+*.ico        binary
+*.icns       binary
+# Fonts
+*.woff       binary
+*.woff2      binary
+*.ttf        binary
+*.otf        binary
+*.eot        binary
+# Archives
+*.zip        binary
+*.gz         binary
+*.tgz        binary
+*.tar        binary
+*.bz2        binary
+*.7z         binary
+*.rar        binary
+*.whl        binary
+# Documents / media
+*.pdf        binary
+*.doc        binary
+*.docx       binary
+*.xls        binary
+*.xlsx       binary
+*.ppt        binary
+*.pptx       binary
+*.mp3        binary
+*.mp4        binary
+*.mov        binary
+*.wav        binary
+*.webm       binary
+# Compiled / opaque
+*.exe        binary
+*.dll        binary
+*.so         binary
+*.dylib      binary
+*.wasm       binary
+*.jar        binary
+*.class      binary
+*.pyc        binary
+*.bin        binary
+*.dat        binary
